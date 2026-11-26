@@ -118,6 +118,49 @@ python example_mm.py --data_path examples/room/rgb --save_path examples/room_no_
   * `--ckpt`: Path to a custom model checkpoint file.
   * `--device`: Device to run inference on. (Default: `cuda`)
 
+### Local OpenSfM comparison
+
+From this checkout, run the three construction variants with the local OpenSfM
+checkout and the `opensfm` and `pi3x` conda environments.
+
+```bash
+python -m my.run_opensfm_pi3x --blender-priors ~/work/dvlt/cameras/construction
+python -m my.point_cloud_browser
+```
+
+OpenSfM outputs go to `~/work/dvlt/opensfm/construction`. The viewer at
+`http://127.0.0.1:8001/` lists `construction/opensfm/cameras`, `sparse`, and
+`dense`. All three runs use the same undistorted images and OpenSfM camera
+estimates. The dense run uses OpenSfM's consistency-checked depth maps.
+The optional Blender reference produces `evaluation.json` beside the prediction
+runs.
+
+Use `--images`, `--work-dir`, and `--output-dir` for another dataset. The
+`--stage` flag runs reconstruction, prior export, prediction, or evaluation
+independently. For example, `--stage prediction --variant dense` reruns the
+dense variant from the saved OpenSfM outputs.
+
+To prepare Blender camera and GCP priors for Pi3X separately, point the
+converter at the camera JSON directory and its GCP file.
+
+```bash
+imageset="$HOME/repos/artefacts/drone/workspaces/construction_full/imageset"
+python -m my.prepare_priors blender --images ~/work/dvlt/images/construction/all \
+  --blender-dir "$imageset" --gcp "$imageset/gcp.json" \
+  --output-dir ~/work/dvlt/cameras/construction
+```
+
+Use `python -m my.compare_blender_geometry prepare --help` to prepare aligned
+geometry from saved predictions using Blender cameras and a confidence
+percentile shared across runs. The default mesh alignment uses separate fit
+and evaluation samples. Initial depth scale comes from mesh intersections
+along the fit rays, followed by a nearest-surface similarity fit with a
+residual scale range of 0.85 to 1.15. Use `--alignment gcps` to reproduce
+the control-point alignment. For OpenSfM runs, use the `opensfm` environment
+with the local OpenSfM checkout on `PYTHONPATH`. Run
+`python -m my.compare_blender_geometry score --help` in a Python environment
+with `bpy` to measure point-to-mesh distances against the source `.blend` scene.
+
 ### 3\. Run with Gradio Demo
 
 You can also launch a local Gradio demo for an interactive experience.

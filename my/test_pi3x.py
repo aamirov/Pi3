@@ -140,6 +140,31 @@ def load_sparse_depth(
     return maps
 
 
+def load_dense_depth(
+    directory: Path, image_paths: list[Path], valid: np.ndarray, pixel_transforms: np.ndarray
+) -> np.ndarray:
+    maps = np.zeros(valid.shape, dtype=np.float32)
+    for index, path in enumerate(image_paths):
+        with np.load(directory / f"{path.name}.npz", allow_pickle=False) as archive:
+            depth = archive["depth"].astype(np.float32)
+        rows = np.flatnonzero(valid[index].any(axis=1))
+        columns = np.flatnonzero(valid[index].any(axis=0))
+        top, left = rows[0], columns[0]
+        height, width = rows[-1] - top + 1, columns[-1] - left + 1
+        sx, sy = pixel_transforms[index, (0, 1), (0, 1)]
+        expected = (round(height / float(sy)), round(width / float(sx)))
+        if depth.shape != expected:
+            raise ValueError(f"{path.name}: expected original depth shape {expected}, got {depth.shape}")
+        depth = np.where(np.isfinite(depth) & (depth > 0), depth, 0)
+        if depth.shape != (height, width):
+            depth = np.asarray(Image.fromarray(depth).resize((width, height), Image.Resampling.NEAREST))
+        maps[index, top : top + height, left : left + width] = depth
+        maps[index, ~valid[index]] = 0
+    if not np.any(maps):
+        raise ValueError("No positive dense depths in the selected images")
+    return maps
+
+
 def load_checkpoint(checkpoint: str) -> Path:
     path = Path(checkpoint).expanduser()
     if path.is_file():
@@ -228,9 +253,14 @@ def main() -> None:
         "--camera-priors", type=Path,
         help="NPZ with image_names, OpenCV camera-to-world poses, and intrinsics at original image size",
     )
-    parser.add_argument(
+    depth_options = parser.add_mutually_exclusive_group()
+    depth_options.add_argument(
         "--sparse-depth", type=Path,
         help="NPZ with image_names, xy at original pixel centers (zero-based), and positive camera-Z depths",
+    )
+    depth_options.add_argument(
+        "--dense-depth-dir", type=Path,
+        help="Directory of {image_name}.npz files with original-resolution camera-Z depth arrays",
     )
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
@@ -259,12 +289,18 @@ def main() -> None:
             depth_priors = load_sparse_depth(args.sparse_depth.expanduser(), paths, valid, pixel_transforms)
         except (KeyError, OSError, ValueError) as error:
             parser.error(f"could not load sparse depth: {error}")
+    if args.dense_depth_dir:
+        try:
+            depth_priors = load_dense_depth(args.dense_depth_dir.expanduser(), paths, valid, pixel_transforms)
+        except (KeyError, OSError, ValueError) as error:
+            parser.error(f"could not load dense depth: {error}")
     _, height, width, _ = rgb.shape
     print(f"Running Pi3X on {len(paths)} images at {width}x{height} on {torch.cuda.get_device_name()} (FP32)", flush=True)
     if camera_priors is not None:
         print(f"Conditioning on {len(paths)} camera poses and intrinsics from {args.camera_priors.expanduser()}", flush=True)
     if depth_priors is not None:
-        print(f"Conditioning on {np.count_nonzero(depth_priors)} sparse depths from {args.sparse_depth.expanduser()}", flush=True)
+        depth_source = (args.sparse_depth or args.dense_depth_dir).expanduser()
+        print(f"Conditioning on {np.count_nonzero(depth_priors):,} depths from {depth_source}", flush=True)
     checkpoint = load_checkpoint(args.checkpoint)
     print(f"Loading checkpoint {checkpoint}", flush=True)
     arrays = predict(rgb, valid, checkpoint, camera_priors, depth_priors)
@@ -275,14 +311,15 @@ def main() -> None:
 
     default_run = "3-with-poses" if camera_priors is not None else "3"
     if depth_priors is not None:
-        default_run += "-sparse-depth"
+        default_run += "-sparse-depth" if args.sparse_depth else "-dense-depth"
     output_dir = (args.output_dir or Path.home() / "work/pi3x/construction" / default_run).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     archive = output_dir / "pi3x_predictions.npz"
     with TemporaryDirectory(dir=output_dir) as staging:
         staged = Path(staging) / archive.name
         np.savez_compressed(
-            staged, **arrays, image_names=np.asarray([path.name for path in paths]), images_rgb=rgb, valid_pixels=valid
+            staged, **arrays, image_names=np.asarray([path.name for path in paths]), images_rgb=rgb,
+            valid_pixels=valid, image_pixel_transforms=pixel_transforms,
         )
         staged.replace(archive)
     print(f"PASS: {len(paths)} cameras and {width}x{height} depth maps with finite 3D points")
